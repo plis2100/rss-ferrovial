@@ -1,165 +1,82 @@
-import re
-import subprocess
+import urllib.parse
+import urllib.request
 import xml.etree.ElementTree as ET
 
-from bs4 import BeautifulSoup
 from datetime import datetime, timezone
 from email.utils import format_datetime
 from pathlib import Path
 
-WEB_URL = "https://newsroom.ferrovial.com/es/"
+WEB_URL = "https://newsroom.ferrovial.com/es/notas-prensa/"
 OUTPUT_FILE = Path("ferrovial.xml")
 
+CONSULTA = (
+    "site:newsroom.ferrovial.com/es/notas-prensa/ Ferrovial"
+)
 
-def descargar_noticias():
-    resultado = subprocess.run(
-        [
-            "curl",
-            "-L",
-            "--compressed",
-            "--silent",
-            "--show-error",
-            "--fail",
-            "--max-time",
-            "60",
-            "-A",
-            (
+GOOGLE_NEWS_URL = (
+    "https://news.google.com/rss/search?"
+    + urllib.parse.urlencode(
+        {
+            "q": CONSULTA,
+            "hl": "es",
+            "gl": "ES",
+            "ceid": "ES:es",
+        }
+    )
+)
+
+
+def descargar_rss():
+    solicitud = urllib.request.Request(
+        GOOGLE_NEWS_URL,
+        headers={
+            "User-Agent": (
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 "
-                "(KHTML, like Gecko) "
-                "Chrome/124 Safari/537.36"
+                "AppleWebKit/537.36 Chrome/124 Safari/537.36"
             ),
-            "-H",
-            (
-                "Accept: text/html,application/xhtml+xml,"
-                "application/xml;q=0.9,*/*;q=0.8"
+            "Accept": (
+                "application/rss+xml,"
+                "application/xml,text/xml"
             ),
-            "-H",
-            "Accept-Language: es-ES,es;q=0.9,en;q=0.8",
-            "-H",
-            "Cache-Control: no-cache",
-            WEB_URL,
-        ],
-        capture_output=True,
-        check=True,
+            "Accept-Language": "es-ES,es;q=0.9",
+        },
     )
 
-    contenido = resultado.stdout
+    with urllib.request.urlopen(
+        solicitud,
+        timeout=60,
+    ) as respuesta:
+        contenido = respuesta.read()
 
     if not contenido:
         raise RuntimeError(
-            "Ferrovial ha devuelto una página vacía"
+            "Google News ha devuelto una respuesta vacía"
         )
 
-    soup = BeautifulSoup(contenido, "html.parser")
+    raiz_original = ET.fromstring(contenido)
+    canal_original = raiz_original.find("channel")
 
-    noticias = []
-    enlaces_encontrados = set()
-
-    for tarjeta in soup.select(
-        "section.last-notes article.last-notes__item"
-    ):
-        enlace_elemento = tarjeta.select_one("a[href]")
-
-        if not enlace_elemento:
-            continue
-
-        enlace = enlace_elemento.get("href", "").strip()
-        titulo = enlace_elemento.get("title", "").strip()
-
-        if not titulo:
-            titulo_elemento = tarjeta.select_one(
-                "[class*='caption-title']"
-            )
-
-            if titulo_elemento:
-                titulo = titulo_elemento.get_text(
-                    " ",
-                    strip=True,
-                )
-
-        fecha = ""
-        fecha_elemento = tarjeta.select_one("time")
-
-        if fecha_elemento:
-            fecha = (
-                fecha_elemento.get("datetime")
-                or fecha_elemento.get_text(" ", strip=True)
-            )
-
-        imagen = ""
-        fondo_elemento = tarjeta.select_one(
-            "[style*='background-image']"
+    if canal_original is None:
+        raise RuntimeError(
+            "Google News no ha devuelto una RSS válida"
         )
 
-        if fondo_elemento:
-            estilo = fondo_elemento.get("style", "")
+    elementos_originales = canal_original.findall("item")
 
-            coincidencia = re.search(
-                r"url\(\s*['\"]?([^'\")]+)",
-                estilo,
-            )
-
-            if coincidencia:
-                imagen = coincidencia.group(1).strip()
-
-        if (
-            not titulo
-            or not enlace
-            or enlace in enlaces_encontrados
-        ):
-            continue
-
-        enlaces_encontrados.add(enlace)
-
-        noticias.append(
-            {
-                "titulo": titulo,
-                "enlace": enlace,
-                "fecha": fecha,
-                "imagen": imagen,
-            }
+    if not elementos_originales:
+        raise RuntimeError(
+            "No se encontraron notas de prensa de Ferrovial"
         )
 
-    return noticias
+    crear_rss(elementos_originales)
 
 
-def convertir_fecha(fecha):
-    formatos = [
-        "%d %b %Y",
-        "%d/%m/%Y",
-        "%Y-%m-%d",
-    ]
-
-    meses = {
-        "Ene": "Jan",
-        "Abr": "Apr",
-        "Ago": "Aug",
-        "Dic": "Dec",
-    }
-
-    for espanol, ingles in meses.items():
-        fecha = fecha.replace(espanol, ingles)
-
-    for formato in formatos:
-        try:
-            return datetime.strptime(
-                fecha,
-                formato,
-            ).replace(tzinfo=timezone.utc)
-        except ValueError:
-            continue
-
-    return None
-
-
-def crear_rss(noticias):
+def crear_rss(elementos_originales):
     rss = ET.Element(
         "rss",
         {
             "version": "2.0",
             "xmlns:atom": "http://www.w3.org/2005/Atom",
-            "xmlns:media": "http://search.yahoo.com/mrss/",
         },
     )
 
@@ -172,8 +89,7 @@ def crear_rss(noticias):
     ET.SubElement(canal, "link").text = WEB_URL
 
     ET.SubElement(canal, "description").text = (
-        "Últimas notas de prensa y comunicaciones "
-        "corporativas de Ferrovial"
+        "Últimas notas de prensa publicadas por Ferrovial"
     )
 
     ET.SubElement(canal, "language").text = "es"
@@ -187,27 +103,46 @@ def crear_rss(noticias):
         "{http://www.w3.org/2005/Atom}link",
     )
 
-    enlace_atom.set("href", WEB_URL)
+    enlace_atom.set("href", GOOGLE_NEWS_URL)
     enlace_atom.set("rel", "self")
     enlace_atom.set("type", "application/rss+xml")
 
-    for noticia in noticias:
+    enlaces_encontrados = set()
+    noticias_incluidas = 0
+
+    for original in elementos_originales:
+        titulo = original.findtext("title", "").strip()
+        enlace = original.findtext("link", "").strip()
+        fecha = original.findtext("pubDate", "").strip()
+        descripcion = original.findtext(
+            "description",
+            "",
+        ).strip()
+
+        if not titulo or not enlace:
+            continue
+
+        if enlace in enlaces_encontrados:
+            continue
+
+        enlaces_encontrados.add(enlace)
+
         elemento = ET.SubElement(canal, "item")
 
         ET.SubElement(
             elemento,
             "title",
-        ).text = noticia["titulo"]
+        ).text = titulo
 
         ET.SubElement(
             elemento,
             "link",
-        ).text = noticia["enlace"]
+        ).text = enlace
 
         ET.SubElement(
             elemento,
             "description",
-        ).text = noticia["titulo"]
+        ).text = descripcion or titulo
 
         ET.SubElement(
             elemento,
@@ -220,29 +155,20 @@ def crear_rss(noticias):
         )
 
         identificador.set("isPermaLink", "true")
-        identificador.text = noticia["enlace"]
+        identificador.text = enlace
 
-        if noticia["fecha"]:
-            fecha_publicacion = convertir_fecha(
-                noticia["fecha"]
-            )
-
-            if fecha_publicacion:
-                ET.SubElement(
-                    elemento,
-                    "pubDate",
-                ).text = format_datetime(
-                    fecha_publicacion
-                )
-
-        if noticia["imagen"]:
-            imagen = ET.SubElement(
+        if fecha:
+            ET.SubElement(
                 elemento,
-                "{http://search.yahoo.com/mrss/}content",
-            )
+                "pubDate",
+            ).text = fecha
 
-            imagen.set("url", noticia["imagen"])
-            imagen.set("medium", "image")
+        noticias_incluidas += 1
+
+    if noticias_incluidas == 0:
+        raise RuntimeError(
+            "No se pudo incluir ninguna noticia"
+        )
 
     ET.indent(rss, space="  ")
 
@@ -252,21 +178,14 @@ def crear_rss(noticias):
         xml_declaration=True,
     )
 
-
-def main():
-    noticias = descargar_noticias()
-
-    if not noticias:
-        raise RuntimeError(
-            "No se encontraron notas de prensa de Ferrovial"
-        )
-
-    crear_rss(noticias)
-
     print(
         f"RSS creada correctamente con "
-        f"{len(noticias)} noticias"
+        f"{noticias_incluidas} noticias"
     )
+
+
+def main():
+    descargar_rss()
 
 
 if __name__ == "__main__":
