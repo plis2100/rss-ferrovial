@@ -1,5 +1,5 @@
 import re
-import urllib.request
+import subprocess
 import xml.etree.ElementTree as ET
 
 from bs4 import BeautifulSoup
@@ -12,24 +12,44 @@ OUTPUT_FILE = Path("ferrovial.xml")
 
 
 def descargar_noticias():
-    solicitud = urllib.request.Request(
-        WEB_URL,
-        headers={
-            "User-Agent": (
+    resultado = subprocess.run(
+        [
+            "curl",
+            "-L",
+            "--compressed",
+            "--silent",
+            "--show-error",
+            "--fail",
+            "--max-time",
+            "60",
+            "-A",
+            (
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 Chrome/124 Safari/537.36"
+                "AppleWebKit/537.36 "
+                "(KHTML, like Gecko) "
+                "Chrome/124 Safari/537.36"
             ),
-            "Accept": (
-                "text/html,application/xhtml+xml,"
+            "-H",
+            (
+                "Accept: text/html,application/xhtml+xml,"
                 "application/xml;q=0.9,*/*;q=0.8"
             ),
-            "Accept-Language": "es-ES,es;q=0.9",
-            "Cache-Control": "no-cache",
-        },
+            "-H",
+            "Accept-Language: es-ES,es;q=0.9,en;q=0.8",
+            "-H",
+            "Cache-Control: no-cache",
+            WEB_URL,
+        ],
+        capture_output=True,
+        check=True,
     )
 
-    with urllib.request.urlopen(solicitud, timeout=60) as respuesta:
-        contenido = respuesta.read()
+    contenido = resultado.stdout
+
+    if not contenido:
+        raise RuntimeError(
+            "Ferrovial ha devuelto una página vacía"
+        )
 
     soup = BeautifulSoup(contenido, "html.parser")
 
@@ -45,11 +65,7 @@ def descargar_noticias():
             continue
 
         enlace = enlace_elemento.get("href", "").strip()
-
-        titulo = enlace_elemento.get(
-            "title",
-            "",
-        ).strip()
+        titulo = enlace_elemento.get("title", "").strip()
 
         if not titulo:
             titulo_elemento = tarjeta.select_one(
@@ -63,7 +79,6 @@ def descargar_noticias():
                 )
 
         fecha = ""
-
         fecha_elemento = tarjeta.select_one("time")
 
         if fecha_elemento:
@@ -73,13 +88,13 @@ def descargar_noticias():
             )
 
         imagen = ""
-
         fondo_elemento = tarjeta.select_one(
             "[style*='background-image']"
         )
 
         if fondo_elemento:
             estilo = fondo_elemento.get("style", "")
+
             coincidencia = re.search(
                 r"url\(\s*['\"]?([^'\")]+)",
                 estilo,
@@ -153,20 +168,25 @@ def crear_rss(noticias):
     ET.SubElement(canal, "title").text = (
         "Notas de prensa de Ferrovial"
     )
+
     ET.SubElement(canal, "link").text = WEB_URL
+
     ET.SubElement(canal, "description").text = (
         "Últimas notas de prensa y comunicaciones "
         "corporativas de Ferrovial"
     )
+
     ET.SubElement(canal, "language").text = "es"
-    ET.SubElement(canal, "lastBuildDate").text = format_datetime(
-        datetime.now(timezone.utc)
+
+    ET.SubElement(canal, "lastBuildDate").text = (
+        format_datetime(datetime.now(timezone.utc))
     )
 
     enlace_atom = ET.SubElement(
         canal,
         "{http://www.w3.org/2005/Atom}link",
     )
+
     enlace_atom.set("href", WEB_URL)
     enlace_atom.set("rel", "self")
     enlace_atom.set("type", "application/rss+xml")
@@ -194,7 +214,11 @@ def crear_rss(noticias):
             "category",
         ).text = "Notas de prensa"
 
-        identificador = ET.SubElement(elemento, "guid")
+        identificador = ET.SubElement(
+            elemento,
+            "guid",
+        )
+
         identificador.set("isPermaLink", "true")
         identificador.text = noticia["enlace"]
 
@@ -207,13 +231,16 @@ def crear_rss(noticias):
                 ET.SubElement(
                     elemento,
                     "pubDate",
-                ).text = format_datetime(fecha_publicacion)
+                ).text = format_datetime(
+                    fecha_publicacion
+                )
 
         if noticia["imagen"]:
             imagen = ET.SubElement(
                 elemento,
                 "{http://search.yahoo.com/mrss/}content",
             )
+
             imagen.set("url", noticia["imagen"])
             imagen.set("medium", "image")
 
